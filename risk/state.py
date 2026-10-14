@@ -46,3 +46,29 @@ class InMemoryRiskStore:
 
     async def save_equity(self, at: datetime, equity: float, source: str) -> None:
         self.equity.append((at, equity, source))
+
+
+class PrefixedRiskStore:
+    """
+    Gives a separate risk engine (paper trading, a backtest) its own circuit
+    breaker, drawdown marks and loss streak on a shared store, by prefixing
+    every key. A paper-trading loss can then never trip the breaker of the
+    real account, or the other way round.
+    """
+
+    def __init__(self, store: RiskStateStore, prefix: str):
+        self._store = store
+        self._prefix = prefix
+        self.persistent = getattr(store, "persistent", False)
+
+    async def get_state(self, key: str) -> Optional[dict]:
+        return await self._store.get_state(self._prefix + key)
+
+    async def set_state(self, key: str, value: dict) -> None:
+        await self._store.set_state(self._prefix + key, value)
+
+    async def log_event(self, kind: str, reason: str, details: Optional[dict] = None) -> None:
+        await self._store.log_event(kind, f"{self._prefix}{reason}", details)
+
+    async def save_equity(self, at: datetime, equity: float, source: str) -> None:
+        await self._store.save_equity(at, equity, source)

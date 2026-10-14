@@ -27,10 +27,16 @@ class CorrelationMatrix:
     def from_candles(
         cls, candles: dict[str, list[Candle]], min_samples: int = 100
     ) -> "CorrelationMatrix":
-        closes = {
+        return cls.from_closes({
             sym: {c.timestamp: c.close for c in rows if c.close > 0}
             for sym, rows in candles.items()
-        }
+        }, min_samples)
+
+    @classmethod
+    def from_closes(
+        cls, closes: dict[str, dict], min_samples: int = 100
+    ) -> "CorrelationMatrix":
+        """Same as from_candles, from {symbol: {time: close}}."""
         symbols = sorted(closes)
         values: dict[tuple[str, str], float] = {}
         samples: dict[tuple[str, str], int] = {}

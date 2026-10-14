@@ -31,6 +31,9 @@ from events import EventBus, Event, EventType
 
 logger = structlog.get_logger()
 
+# Pause between history pages, well inside Bybit's public rate limit.
+HISTORY_PAUSE_S = 0.12
+
 
 class BybitAdapter(ExchangeAdapter):
     """
@@ -308,6 +311,74 @@ class BybitAdapter(ExchangeAdapter):
         # API returns newest first; reverse to chronological
         candles.reverse()
         return candles
+
+    async def get_candle_history(
+        self, symbol: str, interval: str, start: datetime, end: datetime
+    ) -> list[Candle]:
+        """
+        Closed candles with open time in [start, end), oldest first. Bybit
+        returns at most 1000 candles per call, newest first, so this pages
+        backwards from `end` until it reaches `start` or runs out of data
+        (the contract didn't exist yet).
+        """
+        start_ms = int(start.timestamp() * 1000)
+        cursor = int(end.timestamp() * 1000) - 1
+        now_ms = int(time.time() * 1000)
+        rows: dict[int, list] = {}
+        while cursor >= start_ms:
+            data = await self._request("GET", "/v5/market/kline", {
+                "category": "linear", "symbol": symbol, "interval": interval,
+                "start": start_ms, "end": cursor, "limit": 1000,
+            })
+            if data.get("retCode") != 0:
+                raise ExchangeError(f"kline history {symbol}: {data.get('retMsg')}")
+            page = data.get("result", {}).get("list", [])
+            if not page:
+                break
+            for c in page:
+                t = int(c[0])
+                if start_ms <= t <= cursor and self._is_closed(t, interval, now_ms):
+                    rows[t] = c
+            oldest = min(int(c[0]) for c in page)
+            if oldest > cursor:  # Defensive: the API ignored `end`
+                break
+            cursor = oldest - 1
+            await asyncio.sleep(HISTORY_PAUSE_S)
+        return [Candle(
+            timestamp=datetime.fromtimestamp(t / 1000, tz=timezone.utc),
+            open=float(c[1]), high=float(c[2]), low=float(c[3]), close=float(c[4]),
+            volume=float(c[5]), turnover=float(c[6]) if len(c) > 6 else 0.0,
+            symbol=symbol,
+        ) for t, c in sorted(rows.items())]
+
+    async def get_funding_history(
+        self, symbol: str, start: datetime, end: datetime
+    ) -> list[tuple[datetime, float]]:
+        """Funding settlements in [start, end), oldest first (200 per call)."""
+        start_ms = int(start.timestamp() * 1000)
+        cursor = int(end.timestamp() * 1000) - 1
+        rows: dict[int, float] = {}
+        while cursor >= start_ms:
+            data = await self._request("GET", "/v5/market/funding/history", {
+                "category": "linear", "symbol": symbol,
+                "startTime": start_ms, "endTime": cursor, "limit": 200,
+            })
+            if data.get("retCode") != 0:
+                raise ExchangeError(f"funding history {symbol}: {data.get('retMsg')}")
+            page = data.get("result", {}).get("list", [])
+            if not page:
+                break
+            for f in page:
+                t = int(f["fundingRateTimestamp"])
+                if start_ms <= t <= cursor:
+                    rows[t] = float(f["fundingRate"])
+            oldest = min(int(f["fundingRateTimestamp"]) for f in page)
+            if oldest > cursor:
+                break
+            cursor = oldest - 1
+            await asyncio.sleep(HISTORY_PAUSE_S)
+        return [(datetime.fromtimestamp(t / 1000, tz=timezone.utc), r)
+                for t, r in sorted(rows.items())]
 
     @staticmethod
     def _is_closed(start_ms: int, interval: str, now_ms: int) -> bool:

@@ -7,6 +7,7 @@ All exchange interaction goes through this interface.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Optional
 
 from models import (
@@ -80,6 +81,21 @@ class ExchangeAdapter(ABC):
     @abstractmethod
     async def get_open_interest(self, symbol: str) -> Optional[float]:
         """Current open interest."""
+
+    # ── History (for backtests) ───────────────────────────────────────
+    # Not abstract: an adapter without history can still scan and trade.
+
+    async def get_candle_history(
+        self, symbol: str, interval: str, start: datetime, end: datetime
+    ) -> list[Candle]:
+        """Closed candles with open time in [start, end), oldest first."""
+        raise NotImplementedError(f"{self.name} has no candle history")
+
+    async def get_funding_history(
+        self, symbol: str, start: datetime, end: datetime
+    ) -> list[tuple[datetime, float]]:
+        """(settlement time, funding rate) pairs in [start, end), oldest first."""
+        raise NotImplementedError(f"{self.name} has no funding history")
 
     # ── WebSocket Subscriptions ────────────────────────────────────────
 

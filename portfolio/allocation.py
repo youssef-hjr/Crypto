@@ -8,6 +8,7 @@ as if the others didn't exist.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 from models import (
@@ -29,12 +30,14 @@ class PortfolioAllocator:
         portfolio: PortfolioState,
         markets: dict[str, MarketContext],
         correlations: Optional[CorrelationMatrix] = None,
+        now: Optional[datetime] = None,
     ) -> list[RiskVerdict]:
-        """Verdicts in rank order (highest opportunity score first)."""
+        """Verdicts in rank order (highest opportunity score first). `now` is
+        the time the data is judged at; backtests pass the simulated time."""
         working = portfolio.model_copy(deep=True)
         verdicts = []
         for p in sorted(proposals, key=lambda p: p.opportunity_score, reverse=True):
-            v = await self._risk.evaluate(p, working, markets.get(p.symbol), correlations)
+            v = await self._risk.evaluate(p, working, markets.get(p.symbol), correlations, now)
             verdicts.append(v)
             if v.decision in (RiskDecision.APPROVED, RiskDecision.REDUCED):
                 working.positions.append(Position(

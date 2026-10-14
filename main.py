@@ -11,6 +11,10 @@ MILESTONE 2: Risk + Portfolio Engine
   - Show what would be approved, at what size, and why the rest is rejected
   - NO orders are placed
 
+MILESTONE 3: Backtesting + Paper Trading (separate entry points)
+  - python backtest.py ...     history download, backtests, walk-forward
+  - python paper_trade.py ...  strategies on live data, simulated account
+
 Usage:
   python main.py                        # Scan once, then risk preview
   python main.py --loop                 # Continuous loop
