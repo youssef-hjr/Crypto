@@ -169,3 +169,16 @@ async def test_correlated_symbols_share_the_correlation_cap():
     res = await bt(risk=risk).run([Scripted(bars=(250,))], data)
     assert len(res.trades) == 1
     assert res.rejection_reasons["CORRELATED_RISK_EXCEEDED"] == 1
+
+
+@pytest.mark.asyncio
+async def test_total_drawdown_trip_is_never_reset():
+    """Hitting the total drawdown limit stops trading for good, even with
+    the next-day reset on: the drawdown doesn't go away overnight."""
+    risk = RiskSettings(max_total_drawdown_pct=0.001, max_daily_drawdown_pct=0.5)
+    res = await bt(risk=risk).run([Scripted(bars=(100, 104, 130))], gap_crash_data())
+    assert [t.exit_reason for t in res.trades] == ["stop_gap"]
+    assert len(res.breaker_trips) == 1
+    assert res.breaker_trips[0]["reason"] == "TOTAL_DRAWDOWN_LIMIT"
+    assert res.rejection_reasons["CIRCUIT_BREAKER_ACTIVE"] == 2
+    assert res.halted_at is not None and res.metrics()["halted_at"]

@@ -69,9 +69,10 @@ class BacktestConfig:
     initial_equity: float = 10_000.0
     costs: CostModel = field(default_factory=CostModel)
     # A tripped breaker blocks trading until an operator resets it. A
-    # backtest has no operator, so by default it resets at the next UTC
-    # day and every trip is counted in the report. Set False to keep it
-    # tripped for the rest of the test, as it would be live.
+    # backtest has no operator, so by default a DAILY drawdown trip resets
+    # at the next UTC day and is counted in the report. A TOTAL drawdown
+    # trip is never reset: trading stops for the rest of the test, as it
+    # would live. Set False to keep daily trips tripped too.
     breaker_reset_daily: bool = True
     entry_delay_bars: int = 0  # Extra latency: fill this many bars later
     correlation_bars: int = 200
@@ -141,6 +142,7 @@ class BacktestResult:
     rejection_reasons: Counter
     cancelled_entries: Counter
     breaker_trips: list[dict]
+    halted_at: Optional[datetime]
     signals: int
     config: BacktestConfig
     strategies: list[dict]
@@ -152,6 +154,7 @@ class BacktestResult:
     def metrics(self) -> dict:
         m = perf.summarize(self.trades, self.equity, self.gross_exposure)
         m.update(signals=self.signals, breaker_trips=len(self.breaker_trips),
+                 halted_at=str(self.halted_at) if self.halted_at else None,
                  approved=self.decisions.get("approved", 0) + self.decisions.get("reduced", 0),
                  rejected=self.decisions.get("rejected", 0),
                  entries_cancelled=sum(self.cancelled_entries.values()))
@@ -238,6 +241,7 @@ class Backtester:
         decisions, reasons, cancelled = Counter(), Counter(), Counter()
         signals_seen = 0
         current_day = None
+        halted_at = None  # When a breaker trip that is never reset stopped trading
 
         def close(sym: str, exit_: ExitFill, at: datetime) -> TradeRecord:
             nonlocal balance
@@ -319,7 +323,8 @@ class Backtester:
             day = close_time.date()
             if day != current_day:
                 current_day = day
-                if cfg.breaker_reset_daily and risk.is_circuit_breaker_active:
+                if (cfg.breaker_reset_daily and risk.is_circuit_breaker_active
+                        and risk.breaker.reason == "DAILY_DRAWDOWN_LIMIT"):
                     await risk.reset_circuit_breaker(
                         "backtest", "Automatic next-day reset (backtest only)")
 
@@ -327,6 +332,11 @@ class Backtester:
                 logger.warning("backtest_account_wiped_out", at=str(close_time))
                 break
             await risk.observe(self._portfolio(equity, unreal, {}, {}, close_time))
+            if halted_at is None and risk.is_circuit_breaker_active \
+                    and risk.breaker.reason != "DAILY_DRAWDOWN_LIMIT":
+                halted_at = close_time
+                logger.warning("backtest_trading_halted", at=str(close_time),
+                               reason=risk.breaker.reason)
 
             # Signals on the bar that just closed
             signals: list[Signal] = []
@@ -413,7 +423,7 @@ class Backtester:
             equity=pd.Series(eq_values, index=pd.DatetimeIndex(eq_times), dtype=float),
             gross_exposure=pd.Series(gross_values, index=pd.DatetimeIndex(eq_times), dtype=float),
             decisions=decisions, rejection_reasons=reasons, cancelled_entries=cancelled,
-            breaker_trips=trips, signals=signals_seen, config=cfg,
+            breaker_trips=trips, halted_at=halted_at, signals=signals_seen, config=cfg,
             strategies=[{"name": s.name, "params": s.params} for s in strategies],
             symbols=sorted(prepared), start=start, end=end,
             coverage={s: coverage(p.phases, cov_start, end) for s, p in prepared.items()},

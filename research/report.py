@@ -57,6 +57,10 @@ def summary_lines(m: dict) -> list[str]:
         lines.append(f"Risk Manager  {m['signals']} signals: {m['approved']} approved,"
                      f" {m['rejected']} rejected; {m['entries_cancelled']} entries cancelled;"
                      f" circuit breaker trips {m['breaker_trips']}")
+    if m.get("halted_at"):
+        lines.append(f"HALTED        the total drawdown limit tripped the circuit breaker on"
+                     f" {m['halted_at'][:10]}; no new trades after that (it is never reset"
+                     " automatically). Results after that date are not the strategy's.")
     return lines
 
 
