@@ -3,6 +3,7 @@ Milestone 3: paper trading on live Bybit market data. No real money, no
 orders: the account is simulated, the prices and order books are real.
 
   python paper_trade.py                       # Run until Ctrl+C
+  python paper_trade.py --strategy trend --interval 240 --params fast=10,stop_atr=2.0
   python paper_trade.py --once                # One cycle, then exit
   python paper_trade.py --status              # Equity, positions, journal stats
   python paper_trade.py --close-all           # Close every paper position now
@@ -47,8 +48,12 @@ async def build(args, settings):
     from risk.drawdown import DrawdownTracker
     from risk.risk_manager import RiskManager
     from risk.state import InMemoryRiskStore, PrefixedRiskStore
-    from strategies import build_strategies
+    from strategies import build_strategies, parse_params
 
+    try:
+        strategies = build_strategies(args.strategy, parse_params(args.params))
+    except ValueError as e:
+        sys.exit(str(e))
     bus = EventBus()
     repo = journal = None
     if args.no_db:
@@ -78,7 +83,7 @@ async def build(args, settings):
     # Market data only. The adapter's account side is never called here.
     exchange = BybitAdapter(settings.bybit, bus)
     trader = PaperTrader(
-        exchange, risk, build_strategies(args.strategy),
+        exchange, risk, strategies,
         [s.strip() for s in args.symbols.split(",")], settings, store,
         interval=args.interval, costs=CostModel(), journal=journal,
         initial_equity=args.equity)
@@ -121,7 +126,8 @@ async def run(args) -> None:
             return
 
         logger.info("=== PAPER TRADING (no orders are placed) ===",
-                    strategies=args.strategy, symbols=args.symbols, interval=args.interval,
+                    strategies=args.strategy, params=args.params or "defaults",
+                    symbols=args.symbols, interval=args.interval,
                     equity=round(acct.equity(), 2), open_positions=len(acct.positions),
                     breaker=risk.breaker.reason if risk.is_circuit_breaker_active else "off")
         while True:
@@ -166,6 +172,9 @@ def main() -> None:
 
     ap = argparse.ArgumentParser(description="Paper trading on live Bybit data. No orders.")
     ap.add_argument("--strategy", default="all")
+    ap.add_argument("--params", default=None,
+                    help="Override strategy settings, e.g. fast=10,stop_atr=2.0"
+                         " (needs a single --strategy)")
     ap.add_argument("--symbols", default=DEFAULT_SYMBOLS)
     ap.add_argument("--interval", default="60", help="Strategy candle minutes")
     ap.add_argument("--poll", type=int, default=30, help="Seconds between cycles")

@@ -4,6 +4,7 @@ Milestone 3: backtesting.
   python backtest.py download                  # Fetch history into PostgreSQL
   python backtest.py run                       # Backtest all strategies on it
   python backtest.py run --strategy trend      # One strategy
+  python backtest.py run --strategy trend --params fast=10,stop_atr=2.0
   python backtest.py walk-forward --strategy breakout
   python backtest.py run --synthetic           # Try it on made-up data, no DB
 
@@ -110,12 +111,15 @@ async def cmd_run(args, settings: AppSettings) -> None:
     from research import report
     from research.backtester import Backtester
     from research.monte_carlo import monte_carlo
-    from strategies import build_strategies
+    from strategies import build_strategies, parse_params
 
+    try:
+        strategies = build_strategies(args.strategy, parse_params(args.params))
+    except ValueError as e:
+        sys.exit(str(e))
     bt = Backtester(_config(args), settings.risk)
     data, repo, research, start = await _load(args, settings, bt)
     try:
-        strategies = build_strategies(args.strategy)
         res = await bt.run(strategies, data, start, _date(args.end))
         m = res.metrics()
         mc = monte_carlo(res.trades)
@@ -257,6 +261,9 @@ def main(argv=None) -> None:
         if name == "run":
             p.add_argument("--csv", default=None,
                            help="Write every trade to this CSV file, e.g. results/trades.csv")
+            p.add_argument("--params", default=None,
+                           help="Override strategy settings, e.g. fast=10,stop_atr=2.0"
+                                " (needs a single --strategy)")
         else:
             p.add_argument("--train-days", type=int, default=365)
             p.add_argument("--test-days", type=int, default=90)

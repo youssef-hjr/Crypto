@@ -94,3 +94,26 @@ def test_expected_value_with_a_win_rate():
     s = Breakout()
     assert s.calculate_expected_value(100, 98, 104) == pytest.approx(2.0)
     assert s.calculate_expected_value(100, 98, 104, win_rate=0.4) == pytest.approx(0.2)
+
+
+def test_params_override_defaults_for_a_single_strategy():
+    from strategies import build_strategies, parse_params
+    params = parse_params("fast=10, stop_atr=2.0")
+    assert params == {"fast": 10, "stop_atr": 2.0}
+    assert isinstance(params["fast"], int)
+    (trend,) = build_strategies("trend", params)
+    assert trend.params["fast"] == 10 and trend.params["stop_atr"] == 2.0
+    assert trend.params["slow"] == 50  # Untouched defaults stay
+    assert build_strategies("trend", {})[0].params["fast"] == 20
+
+
+def test_bad_params_are_refused():
+    import pytest
+    from strategies import build_strategies, parse_params
+    for bad in ("fast", "fast=", "fast=ten"):
+        with pytest.raises(ValueError):
+            parse_params(bad)
+    with pytest.raises(ValueError, match="single"):
+        build_strategies("all", {"fast": 10})
+    with pytest.raises(ValueError, match="unknown"):
+        build_strategies("trend", {"fats": 10})
