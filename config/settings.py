@@ -120,6 +120,34 @@ class DatabaseSettings(BaseSettings):
         env_prefix = "DB_"
 
 
+class AISettings(BaseSettings):
+    """
+    Claude as a reasoning layer (Milestone 4). Off unless AI_ENABLED=true or
+    --ai is passed. Every value can be overridden with an AI_* variable.
+
+    The Anthropic API key is NOT a setting: the SDK reads ANTHROPIC_API_KEY
+    from the environment itself, so it never sits in an object that could
+    end up in a prompt or a log. Claude never sees any exchange key either.
+    """
+    enabled: bool = False
+    model: str = "claude-opus-5-5"
+    effort: str = "medium"  # low | medium | high | xhigh | max: more = deeper and dearer
+    max_tokens: int = 16000  # Includes Claude's thinking
+    timeout_seconds: float = 120.0  # No answer in time = NO TRADE
+    server_fallback: bool = True  # Let the API retry a refused request on another model
+
+    # Cost control
+    max_calls_per_day: int = 100  # UTC day; past it, every candidate is NO TRADE
+    max_candidates_per_cycle: int = 3  # Only the best few candidates are sent
+    cache_minutes: float = 30.0  # Same symbol, side and strategy: reuse the answer
+
+    # A TRADE below this confidence is treated as NO TRADE
+    min_confidence: float = 0.55
+
+    class Config:
+        env_prefix = "AI_"
+
+
 class AppSettings(BaseSettings):
     """Top-level application settings."""
     environment: Environment = Environment.DEMO
@@ -140,6 +168,7 @@ class AppSettings(BaseSettings):
     bybit: BybitSettings = BybitSettings()
     risk: RiskSettings = RiskSettings()
     database: DatabaseSettings = DatabaseSettings()
+    ai: AISettings = AISettings()
 
     class Config:
         env_prefix = "APP_"

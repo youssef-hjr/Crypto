@@ -401,6 +401,12 @@ class MarketScanner:
     def technical(self, symbol: str) -> Optional[TechnicalFeatures]:
         return self._technical.get(symbol)
 
+    def order_flow(self, symbol: str) -> Optional[OrderFlowFeatures]:
+        return self._flow.get(symbol)
+
+    def derivatives(self, symbol: str) -> Optional[DerivativesFeatures]:
+        return self._derivatives.get(symbol)
+
     def candles(self, symbol: str) -> list[Candle]:
         return self._candles.get(symbol, [])
 

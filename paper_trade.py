@@ -4,6 +4,8 @@ orders: the account is simulated, the prices and order books are real.
 
   python paper_trade.py                       # Run until Ctrl+C
   python paper_trade.py --strategy trend --interval 240 --params fast=10,stop_atr=2.0
+  python paper_trade.py --ai --account claude # Claude reviews every signal first,
+                                              # on its own separate paper account
   python paper_trade.py --once                # One cycle, then exit
   python paper_trade.py --status              # Equity, positions, journal stats
   python paper_trade.py --close-all           # Close every paper position now
@@ -12,6 +14,11 @@ orders: the account is simulated, the prices and order books are real.
 
 The account, open positions, circuit breaker and loss streak are kept in
 PostgreSQL, so stopping and starting again carries on where it left off.
+
+With --ai (Milestone 4), Claude reviews each signal before the Risk Manager
+sees it and only TRADE answers can open a paper position. Give it its own
+--account and run it next to the plain one: same strategies, same market,
+so the two accounts show whether Claude's filter helps.
 """
 from __future__ import annotations
 
@@ -21,6 +28,7 @@ import getpass
 import sys
 
 import structlog
+from dotenv import load_dotenv
 
 from config.settings import AccountEnv, get_settings
 
@@ -41,6 +49,7 @@ logger = structlog.get_logger()
 async def build(args, settings):
     from database import MarketDataRepository, ResearchRepository, RiskRepository
     from events import EventBus, EventType
+    from ai.factory import build_advisor
     from exchanges.bybit import BybitAdapter
     from paper.engine import PaperTrader
     from research.simulator import CostModel
@@ -77,21 +86,28 @@ async def build(args, settings):
         bus.subscribe(EventType.RISK_APPROVED, record)
         bus.subscribe(EventType.RISK_REJECTED, record)
 
-    store = PrefixedRiskStore(base, PREFIX)
+    if args.account and not args.account.replace("_", "").replace("-", "").isalnum():
+        sys.exit("--account takes letters, digits, - and _ only")
+    # Each named account has its own balance, positions, breaker and drawdown
+    store = PrefixedRiskStore(base, PREFIX + (f"{args.account}:" if args.account else ""))
     risk = RiskManager(settings.risk, bus, breaker=CircuitBreaker(store, bus),
                        drawdown=DrawdownTracker(store, source="paper_trading"), store=store)
     # Market data only. The adapter's account side is never called here.
     exchange = BybitAdapter(settings.bybit, bus)
+    advisor = build_advisor(settings, "paper", repo.engine if repo else None)
+    if advisor is not None:
+        await advisor.load()
     trader = PaperTrader(
         exchange, risk, strategies,
         [s.strip() for s in args.symbols.split(",")], settings, store,
         interval=args.interval, costs=CostModel(), journal=journal,
-        initial_equity=args.equity)
+        initial_equity=args.equity, advisor=advisor)
     return trader, exchange, risk, store, repo
 
 
 async def run(args) -> None:
     settings = get_settings()
+    settings.ai.enabled = settings.ai.enabled or args.ai
     trader, exchange, risk, store, repo = await build(args, settings)
     await exchange.connect()
     try:
@@ -126,12 +142,19 @@ async def run(args) -> None:
             return
 
         logger.info("=== PAPER TRADING (no orders are placed) ===",
+                    account=args.account or "main",
                     strategies=args.strategy, params=args.params or "defaults",
                     symbols=args.symbols, interval=args.interval,
                     equity=round(acct.equity(), 2), open_positions=len(acct.positions),
+                    claude=f"{settings.ai.model} ({settings.ai.effort})"
+                    if settings.ai.enabled else "off",
                     breaker=risk.breaker.reason if risk.is_circuit_breaker_active else "off")
         while True:
             report = await trader.cycle()
+            for r in report.ai_reviews:
+                if not r.approved:
+                    logger.info("CLAUDE_NO_TRADE", symbol=r.candidate.symbol,
+                                strategy=r.candidate.strategy, reasoning=r.decision.reasoning)
             for v in report.verdicts:
                 p = v.original_proposal
                 if v.decision.value == "rejected":
@@ -165,6 +188,7 @@ def show_status(trader, risk) -> None:
 
 
 def main() -> None:
+    load_dotenv()  # API keys from the project's .env file (never committed)
     settings = get_settings()
     assert not settings.execution_enabled, "Execution must be DISABLED until Milestone 5"
     assert settings.bybit.account_env != AccountEnv.MAINNET, \
@@ -178,6 +202,8 @@ def main() -> None:
     ap.add_argument("--symbols", default=DEFAULT_SYMBOLS)
     ap.add_argument("--interval", default="60", help="Strategy candle minutes")
     ap.add_argument("--poll", type=int, default=30, help="Seconds between cycles")
+    ap.add_argument("--account", default="",
+                    help="Name of a separate paper account (e.g. claude); default: the main one")
     ap.add_argument("--equity", type=float, default=settings.paper_equity,
                     help="Starting equity of a NEW paper account")
     ap.add_argument("--once", action="store_true")
@@ -186,6 +212,8 @@ def main() -> None:
     ap.add_argument("--reset-breaker", default=None, metavar="NOTE")
     ap.add_argument("--reset-account", action="store_true")
     ap.add_argument("--no-db", action="store_true")
+    ap.add_argument("--ai", action="store_true",
+                    help="Claude reviews each signal (needs ANTHROPIC_API_KEY)")
     args = ap.parse_args()
     try:
         asyncio.run(run(args))

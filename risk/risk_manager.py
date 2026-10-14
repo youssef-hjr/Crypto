@@ -369,6 +369,11 @@ class RiskManager:
     def drawdown(self) -> DrawdownTracker:
         return self._drawdown
 
+    @property
+    def loss_streak(self) -> int:
+        """Losing trades in a row (after fees and funding)."""
+        return self._recent_losses
+
     # ── Position Sizing Helper ─────────────────────────────────────────
 
     def calculate_position_size(

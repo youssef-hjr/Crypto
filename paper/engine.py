@@ -19,6 +19,10 @@ Each cycle (every `poll_seconds`):
   4. Approved trades fill against the real order book, level by level,
      paying the taker fee. A book too thin for the order fills partly.
 
+With an advisor (paper_trade.py --ai, Milestone 4), Claude reviews the
+signals between steps 2 and 3. Only those it answers TRADE go on to the
+Risk Manager, unchanged; its reasoning is kept in the journal.
+
 The paper account has its own circuit breaker, drawdown marks and loss
 streak (keys prefixed "paper_trading:"), so it can never block or unblock
 the real account's. A tripped paper breaker stays tripped until reset with
@@ -36,7 +40,9 @@ from typing import Optional
 
 import structlog
 
+from agents.order_flow import OrderFlowAgent
 from agents.quant import QuantEngine
+from ai.briefing import Candidate, MarketSnapshot, build_brief, risk_state
 from config.settings import AppSettings
 from exchanges.base import ExchangeAdapter
 from models import (
@@ -104,6 +110,7 @@ class CycleReport:
     opened: list[str] = field(default_factory=list)
     closed: list[TradeRecord] = field(default_factory=list)
     verdicts: list[RiskVerdict] = field(default_factory=list)
+    ai_reviews: list = field(default_factory=list)  # ai.AIReview, with --ai
     errors: list[str] = field(default_factory=list)
 
 
@@ -121,6 +128,7 @@ class PaperTrader:
         costs: Optional[CostModel] = None,
         journal=None,  # database.ResearchRepository, or None to keep nothing
         initial_equity: Optional[float] = None,
+        advisor=None,  # ai.ClaudeAdvisor, or None to trade the strategies alone
     ):
         self._exchange = exchange
         self._risk = risk
@@ -136,6 +144,8 @@ class PaperTrader:
         self._initial = initial_equity or settings.paper_equity
         self._quant = QuantEngine(bar_minutes=interval_minutes(interval))
         self._rules: dict[str, InstrumentRules] = {}
+        self._advisor = advisor
+        self._order_flow = OrderFlowAgent()
         self.account: Optional[PaperAccount] = None
 
     # ── State ──────────────────────────────────────────────────────────
@@ -153,7 +163,8 @@ class PaperTrader:
                 self.account.run_id = await self._journal.save_run(
                     "paper", [{"name": s.name, "params": s.params} for s in self._strategies],
                     self._symbols, self._interval, now, None,
-                    {"costs": self._costs.as_dict(), "initial_equity": self._initial})
+                    {"costs": self._costs.as_dict(), "initial_equity": self._initial,
+                     "claude": self._advisor is not None})
             await self._save()
         return self.account
 
@@ -271,6 +282,11 @@ class PaperTrader:
     async def _trade(self, signals, history, now: datetime, report: CycleReport) -> None:
         acct = self.account
         equity = acct.equity()
+        reviews = {}
+        if self._advisor is not None:
+            signals, reviews = await self._ai_review(signals, history, now, report)
+            if not signals:
+                return
         proposals, markets, meta = [], {}, {}
         for sig, view in signals:
             sym = sig.symbol
@@ -283,6 +299,7 @@ class PaperTrader:
                 report.errors.append(f"{sym}: {e}")
                 continue
             regime = self._quant.detect_regime(view.technical()).value
+            review = reviews.get(sym)
             stop_pct = abs(sig.entry - sig.stop) / sig.entry
             proposals.append(TradeProposal(
                 symbol=sym, direction=sig.direction, strategy=sig.strategy,
@@ -290,12 +307,15 @@ class PaperTrader:
                 position_size_usd=next_risk_budget(
                     equity, self._settings.risk.risk_per_trade_pct) / stop_pct,
                 confidence=sig.confidence, expected_r=sig.expected_r,
-                reasoning=sig.reason, market_regime=regime, opportunity_score=sig.score,
+                reasoning=sig.reason if review is None
+                else f"{sig.reason} | Claude: {review.decision.reasoning}",
+                invalidation=review.decision.invalidation if review else "",
+                market_regime=regime, opportunity_score=sig.score,
             ))
             markets[sym] = MarketContext(symbol=sym, orderbook=book,
                                          turnover_24h=ticker.turnover_24h,
                                          instrument=self._rules[sym])
-            meta[sym] = (sig, regime, view)
+            meta[sym] = (sig, regime, view, review)
         if not proposals:
             return
 
@@ -305,12 +325,14 @@ class PaperTrader:
         verdicts = await self._allocator.allocate(
             proposals, self._portfolio(now), markets, correlations, now=now)
         report.verdicts.extend(verdicts)
+        if self._advisor is not None:
+            await self._advisor.record_verdicts(list(reviews.values()), verdicts)
 
         for v in verdicts:
             if v.decision == RiskDecision.REJECTED:
                 continue
             sym = v.original_proposal.symbol
-            sig, regime, view = meta[sym]
+            sig, regime, view, review = meta[sym]
             book = markets[sym].orderbook
             d = 1 if sig.direction == Side.BUY else -1
             if (book.mid_price - sig.stop) * d <= 0:
@@ -328,7 +350,8 @@ class PaperTrader:
                 confidence=sig.confidence, regime=regime, phases=[],
                 details={"reason": sig.reason, "params": sig.params, "score": sig.score,
                          "risk_decision": v.decision.value, "partial_fill": fill.partial,
-                         "book_mid": book.mid_price},
+                         "book_mid": book.mid_price,
+                         "ai": review.summary() if review is not None else None},
                 fees=fill.fee, slippage_usd=fill.slippage_usd, funding_until=now,
             )
             acct.entry_equity[sym] = equity
@@ -339,6 +362,45 @@ class PaperTrader:
                         strategy=sig.strategy, qty=fill.quantity, price=round(fill.price, 6),
                         stop=round(sig.stop, 6), target=sig.target,
                         risk_usd=round(abs(fill.price - sig.stop) * fill.quantity, 2))
+
+    async def _ai_review(self, signals, history, now: datetime, report: CycleReport):
+        """Ask Claude about the signals; keep the ones it answers TRADE."""
+        cands, views = [], {}
+        for sig, view in signals:
+            cands.append(Candidate(
+                symbol=sig.symbol, direction=sig.direction, strategy=sig.strategy,
+                entry=sig.entry, stop=sig.stop, target=sig.target, score=sig.score,
+                confidence=sig.confidence, expected_r=sig.expected_r, reason=sig.reason,
+                regime=self._quant.detect_regime(view.technical()).value,
+                bar_time=history[sig.symbol][-1].timestamp,
+                bar_minutes=interval_minutes(self._interval),
+                trail_distance=sig.trail_distance, max_hold_bars=sig.max_hold_bars))
+            views[sig.symbol] = view
+
+        briefs = {}
+        portfolio = self._portfolio(now)
+        corr = CorrelationMatrix.from_candles(
+            {s: history[s] for s in set(views) | set(self.account.positions) if s in history},
+            min_samples=self._settings.risk.min_correlation_samples)
+        risk = risk_state(self._risk, self._settings.risk)
+        for c in self._advisor.top(cands):
+            market = MarketSnapshot(technical=views[c.symbol].technical(),
+                                    candles=history[c.symbol])
+            try:
+                market.orderbook = await self._exchange.get_orderbook(
+                    c.symbol, depth=self._settings.orderbook_depth)
+                market.ticker = await self._exchange.get_ticker(c.symbol)
+                trades = await self._exchange.get_recent_trades(c.symbol, limit=200)
+                market.order_flow = self._order_flow.calculate_features(market.orderbook, trades)
+            except Exception as e:  # Claude is told which parts are missing
+                logger.warning("ai_brief_data_missing", symbol=c.symbol, error=str(e))
+            briefs[c.key] = build_brief(c, market, portfolio, risk, corr, cands)
+
+        result = await self._advisor.review(
+            cands, briefs, breaker_active=self._risk.is_circuit_breaker_active, now=now)
+        report.ai_reviews.extend(result)
+        approved = {r.candidate.symbol: r for r in result if r.approved}
+        return [(s, v) for s, v in signals if s.symbol in approved], approved
 
     async def _close(self, sym: str, exit_, at: datetime, report: CycleReport) -> None:
         acct = self.account

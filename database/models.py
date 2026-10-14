@@ -183,3 +183,40 @@ trade_journal = sa.Table(
     sa.Index("ix_trade_journal_run", "run_id"),
     sa.Index("ix_trade_journal_symbol_time", "symbol", "opened_at"),
 )
+
+# ── AI decisions (Milestone 4) ──────────────────────────────────────────
+
+# Every question put to Claude and its answer, so any trade (or skipped
+# trade) can be reconstructed: the brief it saw, what it said, what it cost,
+# and what the Risk Manager then decided (PDF section 42).
+ai_decisions = sa.Table(
+    "ai_decisions", metadata,
+    sa.Column("id", sa.BigInteger().with_variant(sa.Integer, "sqlite"),
+              primary_key=True, autoincrement=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("mode", sa.String(16), nullable=False),  # preview | paper
+    sa.Column("symbol", sa.String(64), nullable=False),
+    sa.Column("strategy", sa.String(64), nullable=False),
+    sa.Column("direction", sa.String(8), nullable=False),
+    sa.Column("bar_time", sa.DateTime(timezone=True)),
+    sa.Column("candidate", JSONType),  # Entry, stop, target, score, ...
+    sa.Column("brief", JSONType),  # Exactly what Claude was sent
+    sa.Column("model", sa.String(64)),
+    sa.Column("request_id", sa.String(128)),
+    sa.Column("decision", sa.String(16), nullable=False),  # TRADE | NO_TRADE, after checks
+    sa.Column("ai_decision", sa.String(16)),  # What Claude itself answered, if anything
+    sa.Column("confidence", sa.Float),
+    sa.Column("expected_r", sa.Float),
+    sa.Column("response", JSONType),  # The validated answer
+    sa.Column("raw_text", sa.Text),  # The answer as received
+    sa.Column("error", sa.Text),  # Why it fell back to NO TRADE, if it did
+    sa.Column("latency_ms", sa.Integer),
+    sa.Column("input_tokens", sa.Integer),
+    sa.Column("output_tokens", sa.Integer),
+    sa.Column("cache_read_tokens", sa.Integer),
+    sa.Column("cost_usd", sa.Float),
+    sa.Column("risk_decision", sa.String(16)),  # approved | reduced | rejected
+    sa.Column("risk_reasons", JSONType),
+    sa.Index("ix_ai_decisions_time", "created_at"),
+    sa.Index("ix_ai_decisions_symbol_time", "symbol", "created_at"),
+)
